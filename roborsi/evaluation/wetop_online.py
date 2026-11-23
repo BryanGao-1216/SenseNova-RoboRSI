@@ -280,11 +280,13 @@ def native_actions(action: Action, worker_id: str, max_chunk_steps: int) -> dict
                 raise ValueError("orientation quaternion must be finite and nonzero")
             targets.append([arm["position"], (quat / norm).tolist(), arm["gripper"]])
     else:
-        targets = np.asarray(data["positions"], dtype=np.float64)
+        targets = data["positions"]
     native = {
         worker_id: {
             "action": targets,
-            "base_motion": np.zeros(3, dtype=np.float64),
+            # Keep the outbound pickle independent of client/server NumPy
+            # versions (NumPy 2 arrays reference numpy._core on the receiver).
+            "base_motion": [0.0, 0.0, 0.0],
             "control_type": data["control_type"],
             "is_rel": False,
             "base_is_rel": True,
@@ -759,10 +761,35 @@ def run_online(
                         "Agent action does not match the current observation"
                     )
                 request = native_actions(action, worker_id, max_chunk_steps)
+                native_action = (
+                    request[0][worker_id]
+                    if isinstance(request, list)
+                    else request[worker_id]
+                )
+                receipt = {
+                    "episode_id": active.identity,
+                    "step_index": active.decisions,
+                    "worker_id": worker_id,
+                    "requested_steps": len(request) if isinstance(request, list) else 1,
+                    "model_action": action.as_dict()["data"],
+                    "native_action": native_action,
+                    "delivery_state": "unconfirmed",
+                }
+                write_json_atomic(log.directory / "last-action.json", receipt)
                 log.event("action_requested", action=action.as_dict())
                 # Do not add an outer retry: only the official SDK can replay
                 # physical actions safely using its reliable-request protocol.
+                previous_steps = getattr(client, "step_count", None)
                 response, done = client.step(request)
+                received_steps = getattr(client, "step_count", None)
+                receipt["delivery_state"] = "response_received"
+                receipt["executed_steps"] = (
+                    received_steps - previous_steps
+                    if type(previous_steps) is int and type(received_steps) is int
+                    else None
+                )
+                write_json_atomic(log.directory / "last-action.json", receipt)
+                log.event("action_response", **receipt)
                 active.decisions += 1
                 log.decisions += 1
                 log.save()
@@ -877,6 +904,7 @@ def main(argv: list[str] | None = None) -> int:
         if directory.exists() and any(directory.iterdir()):
             raise ValueError("output directory must be empty")
         directory.mkdir(parents=True, exist_ok=True)
+        print(f"RoboRSI output directory: {directory}", flush=True)
         client = EvalClient(
             base_url=endpoint,
             token=os.environ[args.token_env],

@@ -268,6 +268,19 @@ def test_joint_positions_preserve_interleaved_finger_indices():
     np.testing.assert_array_equal(converted["0"]["action"], np.arange(16))
 
 
+@pytest.mark.parametrize("data", [ee_action(), joint_action()])
+def test_outbound_action_pickle_requires_no_numpy_modules(data):
+    class NoExternalModules(pickle.Unpickler):
+        def find_class(self, module, name):
+            raise AssertionError(f"wire data depends on {module}.{name}")
+
+    converted = native_actions(action(data), "0", 60)
+    wire = pickle.dumps(converted, protocol=pickle.HIGHEST_PROTOCOL)
+    decoded = NoExternalModules(io.BytesIO(wire)).load()
+    assert decoded == converted
+    assert isinstance(decoded[0]["0"]["base_motion"], list)
+
+
 @pytest.mark.parametrize(
     "data",
     [
@@ -360,6 +373,9 @@ def test_rollover_resets_dialogue_and_preserves_native_partial_scores(tmp_path):
     assert len(client.requests) == 3 and all(
         len(chunk) == 2 for chunk in client.requests
     )
+    receipt = json.loads((tmp_path / "last-action.json").read_text())
+    assert receipt["delivery_state"] == "response_received"
+    assert receipt["episode_id"] == EP2 and receipt["requested_steps"] == 2
 
 
 def test_real_embodied_agent_loop_sees_fresh_context_after_rollover(
@@ -428,6 +444,11 @@ def test_failed_step_is_not_retried_and_resources_are_closed(tmp_path, failure):
     assert len(client.requests) == 1 and client.closed == agents[0].closed == 1
     summary = json.loads((tmp_path / "summary.json").read_text())
     assert summary["completed"] is False and summary["scored_episodes"] == 0
+    receipt = json.loads((tmp_path / "last-action.json").read_text())
+    assert receipt["delivery_state"] == "unconfirmed"
+    assert "executed_steps" not in receipt
+    assert receipt["native_action"]["action"] == [0.0] * 16
+    assert receipt["native_action"]["base_motion"] == [0.0, 0.0, 0.0]
 
 
 def test_local_decision_budget_does_not_invent_native_failure(tmp_path):
@@ -771,7 +792,8 @@ def test_official_sdk_reliable_http_reset_poll_and_early_chunk_end(
                     assert operation == "step_chunk"
                     chunk = pickle.loads(envelope["payload"])
                     assert len(chunk) == 2 and set(chunk[0]) == {"0"}
-                    np.testing.assert_array_equal(chunk[0]["0"]["action"], np.zeros(16))
+                    assert chunk[0]["0"]["action"] == [0.0] * 16
+                    assert chunk[0]["0"]["base_motion"] == [0.0, 0.0, 0.0]
                     output = {
                         "obs": encode(response(native(EP2), result()))
                         if executed.count("step_chunk") == 1
@@ -825,3 +847,6 @@ def test_official_sdk_reliable_http_reset_poll_and_early_chunk_end(
         item == {"data": {"worker_ids": ["0"]}} for item in kills
     )
     assert len(agents[0].observations[0].media) == 2
+    receipt = json.loads((tmp_path / "roborsi/last-action.json").read_text())
+    assert receipt["delivery_state"] == "response_received"
+    assert receipt["requested_steps"] == 2 and receipt["executed_steps"] == 1

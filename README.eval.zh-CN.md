@@ -157,4 +157,23 @@ uv pip install --python .venv/bin/python -e '.[runtime,wetop]' 'PyTurboJPEG>=1.7
 其中只有公开状态的 shape、异常值数量和相机结构，没有图片内容或凭证。
 如果仍失败，提供新的完整报错或该结构文件即可进一步定位。
 
+## 动作请求返回 HTTP 450
+
+如果在 `operation=step_chunk` 阶段反复收到 HTTP 450 和 `Internal Server Error`，
+表示没有拿到该次动作的可靠执行结果。相同请求 ID 的重试不是新的模型决策；
+请求序号也包括 `reset`、`reset_result`，不能当作已执行动作次数。
+
+动作请求已改用 Python 列表，避免 NumPy 2 数组的 pickle 引用 `numpy._core`，
+在旧版服务端 NumPy 中解包失败。HTTP 450 的通用错误体不足以确认具体原因；
+如果更新后仍出现，需要结合最后一条请求和平台后端日志定位，不应增加外层重发。
+
+启动时会打印 `RoboRSI output directory`。该目录中的 `last-action.json` 保存最近一次
+动作的参数和发送确认状态：
+
+- `unconfirmed`：没有收到完整响应，不能判定动作未执行或已执行。
+- `response_received`：SDK 已返回响应；`executed_steps` 记录 SDK 报告的执行步数，
+  不表示机械臂一定到达目标。
+
+文件不包含凭证。持续失败时，可提供该文件以及平台任务 ID、错误日志中的可靠请求 ID。
+
 不要将填写真实 Key 和 Token 后的 `eval.sh` 提交到 Git 或公开分享。

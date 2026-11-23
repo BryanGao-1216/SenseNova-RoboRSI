@@ -12,7 +12,8 @@ python -m pip install -e '.[runtime,wetop]'
 ```
 
 系统 JPEG 库等安装说明见 [部署指南](docs/wetop-online.zh-CN.md#1-安装客户端依赖)。
-从平台已有任务的详情页取得 `task_id` 和对应的 `endpoint`。
+从平台已有任务的详情页复制 `task_id`。`endpoint` 通过本文末尾的 `gmp online ready`
+命令查询，再填写到 `eval.sh` 中。
 
 ## 火山引擎 Kimi-K3.1-Pro
 
@@ -77,6 +78,9 @@ python scripts/evaluation/wetop_online.py run \
 查询已有任务的 endpoint：
 
 ```bash
+export EBENCH_SUBMIT_TOKEN='你的评测平台 Token'
+export EBENCH_TASK_ID='网页显示的已有任务 task_id'
+
 gmp online ready \
   --base_url https://internrobotics.shlab.org.cn/eval \
   --token "$EBENCH_SUBMIT_TOKEN" \

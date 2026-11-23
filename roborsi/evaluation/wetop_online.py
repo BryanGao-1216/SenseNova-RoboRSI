@@ -743,10 +743,16 @@ def main(argv: list[str] | None = None) -> int:
                 f"set both {args.token_env} and {profile.api_key_env} before running"
             )
         try:
-            from genmanip_client import EvalClient
-        except (ImportError, OSError, RuntimeError) as exc:
+            import genmanip_client
+
+            EvalClient = genmanip_client.EvalClient
+        except (ImportError, OSError, RuntimeError, AttributeError) as exc:
             raise RuntimeError(
-                "GenManip client is unavailable; install .[runtime,wetop] and libturbojpeg (see docs/wetop-online.zh-CN.md)"
+                f"GenManip EvalClient import failed in {sys.executable}: "
+                f"{type(exc).__name__}: {exc}. "
+                "Install .[runtime,wetop] into this same interpreter; "
+                "native libjpeg-turbo 2.x requires PyTurboJPEG<2. "
+                "See README.eval.zh-CN.md."
             ) from exc
         tag = hashlib.sha256(args.run_id.encode()).hexdigest()[:12]
         directory = (

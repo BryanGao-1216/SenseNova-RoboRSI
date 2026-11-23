@@ -61,7 +61,8 @@ runtime = [
 wetop = [
     "genmanip-client @ https://github.com/Sage-PhysicalAI/genmanip-client/archive/fbfcd776639db82be3becdc6e39b5401f994da5c.tar.gz#sha256=50ae801544b6374fc392b38aea2f1f7ddd542b31c4d2ad1e7979fce055c9d37f",
     "Pillow>=9.0",
-    "PyTurboJPEG>=1.7",
+    # Ubuntu 20.04 supplies libjpeg-turbo 2.x; PyTurboJPEG 2.x needs native 3.x.
+    "PyTurboJPEG>=1.7,<2",
     "opencv-python-headless>=4.8",
     "filelock>=3",
 ]

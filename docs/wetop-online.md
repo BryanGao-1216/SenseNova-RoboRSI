@@ -16,7 +16,7 @@ From the checkout, in the project's Python 3.11 environment:
 ```bash
 apt-get update
 apt-get install -y libturbojpeg0
-python -m pip install -e '.[runtime,wetop]'
+uv pip install --python .venv/bin/python -e '.[runtime,wetop]'
 export EBENCH_SUBMIT_TOKEN='your-platform-token'
 export ARK_API_KEY='your-volcengine-agent-plan-key'
 python scripts/evaluation/wetop_online.py check
@@ -26,6 +26,11 @@ The extra pins the official SDK to commit
 `fbfcd776639db82be3becdc6e39b5401f994da5c`. The offline check validates config and
 reports credential presence; it does not allocate a worker or query a model.
 `ARK_MODEL_NAME` and `ARK_BASE_URL` override the existing model profile defaults.
+Use the same interpreter for installation and evaluation, especially when a
+Conda base environment is also active. The extra restricts PyTurboJPEG to 1.x
+for Ubuntu 20.04's native libjpeg-turbo 2.x; PyTurboJPEG 2.x requires native 3.0+.
+To see an unwrapped client import failure without contacting the platform, run
+`.venv/bin/python -c "from genmanip_client import EvalClient"`.
 
 Create a private online job using `gmp online submit`, following the official
 quick start. Use `--benchmark_set wet_op_bench_test`, an accurate model name/type

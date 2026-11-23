@@ -18,13 +18,22 @@ Ubuntu 20.04 容器中可以直接以 root 安装 JPEG 解码库：
 cd /gaowenbin/projects/SenseNova-RoboRSI
 apt-get update
 apt-get install -y libturbojpeg0
-python -m pip install -e '.[runtime,wetop]'
+uv pip install --python .venv/bin/python -e '.[runtime,wetop]'
 ```
+
+明确指定项目 `.venv/bin/python`，避免同时激活 Conda base 时把包装入另一个环境。
+uv 虚拟环境没有 pip 时，直接使用 `uv pip`，不需要切换到 base 的 pip。
 
 `wetop` extra 安装固定版本的
 [官方客户端](https://github.com/Sage-PhysicalAI/genmanip-client/tree/fbfcd776639db82be3becdc6e39b5401f994da5c)
 及其实际使用的 CPU 图像依赖。不会安装本地模拟器或本地策略检查点。
 默认关闭 SDK 自带的视频录制，由本适配器保存每次决策看到的 PNG 图像和动作记录。
+其中 `PyTurboJPEG>=1.7,<2` 兼容 Ubuntu 20.04 的 libjpeg-turbo 2.x；
+PyTurboJPEG 2.x 则要求系统库至少 3.0。客户端导入失败时，先在同一解释器验证：
+
+```bash
+.venv/bin/python -c "import sys; print(sys.executable); from genmanip_client import EvalClient; print('EvalClient 导入成功')"
+```
 
 ## 2. 配置两套凭证并离线检查
 

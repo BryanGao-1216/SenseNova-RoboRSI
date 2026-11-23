@@ -8,8 +8,11 @@
 在项目根目录、已激活的 Python 3.11 虚拟环境中运行。首次使用安装依赖：
 
 ```bash
-python -m pip install -e '.[runtime,wetop]'
+uv pip install --python .venv/bin/python -e '.[runtime,wetop]'
 ```
+
+使用项目的 `.venv/bin/python` 安装和运行；同时激活 Conda base 时，直接调用 `pip`
+可能安装到 base。uv 创建的虚拟环境可以不包含 pip，不影响使用上述安装命令。
 
 系统 JPEG 库等安装说明见 [部署指南](docs/wetop-online.zh-CN.md#1-安装客户端依赖)。
 从平台已有任务的详情页复制 `task_id`。`endpoint` 通过本文末尾的 `gmp online ready`
@@ -89,5 +92,19 @@ gmp online ready \
 
 只有返回 `data.ready: true` 且带有 endpoint 时才能启动。若提示任务达到上限，
 先确认使用的是已有任务；平台配额问题需在平台处理。
+
+## 客户端导入失败
+
+Ubuntu 20.04 的系统 JPEG 库是 2.x，需使用 `PyTurboJPEG<2`。PyTurboJPEG 2.x
+要求系统库至少 3.0，不能通过反复安装 Ubuntu 的旧系统库解决。
+项目已约束兼容版本。在项目根目录修复并单独验证导入：
+
+```bash
+uv pip install --python .venv/bin/python -e '.[runtime,wetop]' 'PyTurboJPEG>=1.7,<2'
+.venv/bin/python -c "import sys; print(sys.executable); from genmanip_client import EvalClient; print('EvalClient 导入成功')"
+```
+
+这个验证不会连接平台或调用模型。如果仍失败，完整 traceback 会显示缺少的 Python 包、
+原生库或符号。导入成功后，再执行 `bash eval.sh`。
 
 不要将填写真实 Key 和 Token 后的 `eval.sh` 提交到 Git 或公开分享。

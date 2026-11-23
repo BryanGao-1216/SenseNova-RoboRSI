@@ -9,10 +9,12 @@ import base64
 import io
 import json
 import pickle
+import sys
 import threading
 from copy import deepcopy
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from types import ModuleType
 from urllib.parse import urlsplit
 
 import numpy as np
@@ -415,6 +417,41 @@ def test_original_openai_profile_preserves_agent_responses_format(monkeypatch):
 def test_live_run_requires_endpoint_and_credentials(capsys):
     assert main(["run"]) == 1
     assert "endpoint" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("error_type", [ImportError, RuntimeError, AttributeError])
+def test_client_import_error_shows_cause_and_interpreter_without_secrets(
+    monkeypatch, capsys, error_type
+):
+    module = ModuleType("genmanip_client")
+
+    def missing(name):
+        if name == "EvalClient":
+            raise error_type("native JPEG import failed offline-platform-token")
+        raise AttributeError(name)
+
+    module.__getattr__ = missing
+    monkeypatch.setitem(sys.modules, "genmanip_client", module)
+    monkeypatch.setenv("ARK_API_KEY", "offline-model-key")
+    monkeypatch.setenv("EBENCH_SUBMIT_TOKEN", "offline-platform-token")
+    assert (
+        main(
+            [
+                "run",
+                "--endpoint",
+                "https://example.org/endpoint",
+                "--run-id",
+                "offline-run",
+            ]
+        )
+        == 1
+    )
+    message = capsys.readouterr().err
+    assert sys.executable in message
+    assert f"{error_type.__name__}: native JPEG import failed" in message
+    assert "PyTurboJPEG<2" in message
+    assert "offline-platform-token" not in message
+    assert "[redacted]" in message
 
 
 def test_chunk_limit_is_validated_before_any_remote_reset():

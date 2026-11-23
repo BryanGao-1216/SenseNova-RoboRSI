@@ -145,4 +145,16 @@ uv pip install --python .venv/bin/python -e '.[runtime,wetop]' 'PyTurboJPEG>=1.7
 任务 ID。空动作不会被送往模拟器，也不会被替换成零动作；模型仍需生成通过校验的动作。
 错误后的 `Client closed` 只表示客户端已清理连接，不代表评测完成或取得成绩。
 
+## 关节状态校验失败
+
+旧报错 `WET-OP Lift2 requires state.joints with shape (12,)` 同时涵盖维度不符和
+`NaN/Inf`，不能仅凭这句话判断原因。新版本区分缺失字段、真实 shape 和非有限数值，
+并在报错中显示 `robot_id`、`episode_id`。
+
+像 `(1, 12)`、`(12, 1)` 这样的单样本额外维度会转换为 `(12,)`，不改变关节数量、
+顺序或数值。其他布局和 `NaN/Inf` 仍会停止，避免把错误状态送给模型。
+每回合首次观测还会生成 `episodes/<回合目录>/observation-structure.json`，
+其中只有公开状态的 shape、异常值数量和相机结构，没有图片内容或凭证。
+如果仍失败，提供新的完整报错或该结构文件即可进一步定位。
+
 不要将填写真实 Key 和 Token 后的 `eval.sh` 提交到 Git 或公开分享。

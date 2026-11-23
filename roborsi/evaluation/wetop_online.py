@@ -293,6 +293,74 @@ def native_actions(action: Action, worker_id: str, max_chunk_steps: int) -> dict
     return native if data["steps"] == 1 else [native for _ in range(int(data["steps"]))]
 
 
+def observation_structure(native: dict) -> dict:
+    """Describe public observation layout without images, credentials or goals."""
+
+    def describe(value: Any, depth: int = 0) -> dict:
+        result = {"type": type(value).__name__}
+        try:
+            array = np.asarray(value, dtype=np.float64)
+        except (TypeError, ValueError, OverflowError):
+            if isinstance(value, (list, tuple)) and depth < 3:
+                result["length"] = len(value)
+                result["items"] = [describe(item, depth + 1) for item in value[:4]]
+            return result
+        result["shape"] = list(array.shape)
+        result["nonfinite_count"] = int(np.count_nonzero(~np.isfinite(array)))
+        return result
+
+    return {
+        "robot_id": str(native.get("robot_id", "not_exposed"))[:256],
+        "episode_id": str(native.get("episode_id", "not_exposed"))[:1024],
+        "states": {
+            field: describe(native[field]) if field in native else {"missing": True}
+            for field in (
+                "state.joints",
+                "state.gripper",
+                "state.base",
+                "state.ee_pose",
+            )
+        },
+        "cameras": {
+            key: {
+                "type": type(value).__name__,
+                "shape": list(value.shape) if isinstance(value, np.ndarray) else None,
+            }
+            for key, value in native.items()
+            if isinstance(key, str) and key.startswith("video.")
+        },
+    }
+
+
+def _state_vector(native: dict, field: str, length: int, *, value: Any = None) -> list:
+    """Remove singleton packing axes, preserving joint count/order and values."""
+    context = (
+        f"robot_id={native.get('robot_id')!r}, episode_id={native.get('episode_id')!r}"
+    )
+    if value is None:
+        if field not in native:
+            raise ValueError(f"missing public field {field}; {context}")
+        value = native[field]
+    try:
+        array = np.asarray(value, dtype=np.float64)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(f"{field} is not a numeric state vector; {context}") from exc
+    actual_shape = array.shape
+    array = np.squeeze(array)
+    if array.shape != (length,):
+        raise ValueError(
+            f"WET-OP Lift2 requires {field} with shape ({length},), "
+            f"received shape {actual_shape}; {context}"
+        )
+    invalid = np.flatnonzero(~np.isfinite(array))
+    if invalid.size:
+        raise ValueError(
+            f"{field} has the expected {length} values but contains NaN/Inf at "
+            f"indices {invalid[:16].tolist()} (nonfinite_count={invalid.size}); {context}"
+        )
+    return array.tolist()
+
+
 def observation(native: dict, channel: CaseMediaChannel, step: int) -> Observation:
     """Export public RGB/state only; evaluator metadata never enters the policy."""
     from PIL import Image
@@ -305,21 +373,35 @@ def observation(native: dict, channel: CaseMediaChannel, step: int) -> Observati
         or not native["instruction"].strip()
     ):
         raise ValueError("platform observation needs a nonempty instruction")
-    for field, shape in (("state.joints", (12,)), ("state.gripper", (4,))):
-        array = np.asarray(native.get(field), dtype=np.float64)
-        if array.shape != shape or not np.isfinite(array).all():
-            raise ValueError(f"WET-OP Lift2 requires {field} with shape {shape}")
+    vectors = {
+        field: _state_vector(native, field, length)
+        for field, length in (("state.joints", 12), ("state.gripper", 4))
+    }
+    if "state.base" in native:
+        vectors["state.base"] = _state_vector(native, "state.base", 3)
     poses = native.get("state.ee_pose")
     if not isinstance(poses, (list, tuple, np.ndarray)) or len(poses) != 2:
         raise ValueError("WET-OP Lift2 requires two state.ee_pose entries")
-    for pose in poses:
-        if (
-            len(pose) != 2
-            or np.asarray(pose[0]).shape != (3,)
-            or np.asarray(pose[1]).shape != (4,)
-        ):
+    normalized_poses = []
+    for index, pose in enumerate(poses):
+        if not isinstance(pose, (list, tuple, np.ndarray)) or len(pose) != 2:
             raise ValueError("state.ee_pose entries must be [XYZ, WXYZ]")
-    data = {key: _json(native[key]) for key in _PUBLIC_FIELDS if key in native}
+        normalized_poses.append(
+            [
+                _state_vector(
+                    native, f"state.ee_pose[{index}].position", 3, value=pose[0]
+                ),
+                _state_vector(
+                    native, f"state.ee_pose[{index}].quaternion", 4, value=pose[1]
+                ),
+            ]
+        )
+    vectors["state.ee_pose"] = normalized_poses
+    data = {
+        key: _json(vectors[key] if key in vectors else native[key])
+        for key in _PUBLIC_FIELDS
+        if key in native
+    }
     media = []
     cameras = sorted(key for key in native if key.startswith("video."))
     if not cameras:
@@ -616,8 +698,15 @@ def run_online(
                     episode_dir = log.directory / "episodes" / f"{attempts:06d}-{tag}"
                     episode_dir.mkdir(parents=True)
                     channel = CaseMediaChannel(episode_dir / "media")
+                    structure_path = episode_dir / "observation-structure.json"
+                    write_json_atomic(structure_path, observation_structure(native))
                     # Validate the first observation before constructing a planner.
-                    current = observation(native, channel, 0)
+                    try:
+                        current = observation(native, channel, 0)
+                    except (TypeError, ValueError) as exc:
+                        raise ValueError(
+                            f"{exc}; observation layout: {structure_path}"
+                        ) from exc
                     suffix = identity.rsplit("/", 1)[-1]
                     task = Task(
                         benchmark=BENCHMARK,

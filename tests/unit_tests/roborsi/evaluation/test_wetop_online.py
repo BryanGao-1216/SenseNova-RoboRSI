@@ -33,6 +33,7 @@ from roborsi.evaluation.wetop_online import (
     main,
     native_actions,
     observation,
+    observation_structure,
     run_online,
 )
 
@@ -165,6 +166,67 @@ def test_observation_keeps_rgb_names_and_public_state_only(tmp_path):
             channel.media_dir / Path(obs.media[index].ref).relative_to("media")
         ) as image:
             assert image.getpixel((0, 0)) == (expected,) * 3
+
+
+@pytest.mark.parametrize("shape", [(1, 12), (12, 1), (1, 1, 12)])
+def test_singleton_state_axes_are_normalized_without_changing_joint_order(
+    tmp_path, shape
+):
+    sample = native()
+    sample["state.joints"] = sample["state.joints"].reshape(shape)
+    sample["state.gripper"] = sample["state.gripper"].reshape(1, 4)
+    sample["state.base"] = sample["state.base"].reshape(1, 3)
+    converted = observation(sample, CaseMediaChannel(tmp_path), 0)
+    assert converted.data["state.joints"] == list(range(12))
+    assert converted.data["state.gripper"] == [0.02, 0.02, 0.03, 0.03]
+    assert converted.data["state.base"] == [0.0, 0.0, 0.0]
+
+
+def test_nonfinite_state_is_reported_separately_from_wrong_shape(tmp_path):
+    sample = native()
+    sample["state.joints"][[3, 7]] = [float("nan"), float("inf")]
+    with pytest.raises(
+        ValueError, match=r"NaN/Inf at indices \[3, 7\].*nonfinite_count=2"
+    ):
+        observation(sample, CaseMediaChannel(tmp_path), 0)
+    description = observation_structure(sample)
+    assert description["states"]["state.joints"]["shape"] == [12]
+    assert description["states"]["state.joints"]["nonfinite_count"] == 2
+    json.dumps(description, allow_nan=False)
+
+
+@pytest.mark.parametrize("shape", [(7,), (2, 6), (2, 12)])
+def test_other_joint_layouts_are_not_padded_truncated_or_flattened(tmp_path, shape):
+    sample = native()
+    sample["state.joints"] = np.zeros(shape)
+    with pytest.raises(ValueError) as caught:
+        observation(sample, CaseMediaChannel(tmp_path), 0)
+    message = str(caught.value)
+    assert f"received shape {shape}" in message
+    assert "manip/lift2/R5a" in message and EP1 in message
+
+
+def test_missing_joint_state_has_its_own_diagnostic(tmp_path):
+    sample = native()
+    sample.pop("state.joints")
+    with pytest.raises(ValueError, match="missing public field state.joints"):
+        observation(sample, CaseMediaChannel(tmp_path), 0)
+
+
+def test_failed_initial_state_saves_structure_before_any_model_call(tmp_path):
+    sample = native()
+    sample["state.joints"] = np.full(12, np.nan)
+    client = FakeClient([response(sample)])
+    agents = []
+    with pytest.raises(ValueError, match="observation layout:"):
+        run_online(client, fake_factory(agents), tmp_path)
+    assert not agents and not client.requests and client.closed == 1
+    files = list(tmp_path.glob("episodes/*/observation-structure.json"))
+    assert len(files) == 1
+    description = json.loads(files[0].read_text())
+    assert description["robot_id"] == "manip/lift2/R5a"
+    assert description["states"]["state.joints"]["nonfinite_count"] == 12
+    assert "private_goal_pose" not in description and "instruction" not in description
 
 
 @pytest.mark.parametrize(

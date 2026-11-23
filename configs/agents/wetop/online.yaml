@@ -1,0 +1,18 @@
+# Online WET-OP: generic RoboRSI dialogue, absolute Lift2 dual-arm controls.
+# Model/API connection is bound by wetop_online.py --model-config.
+schema_version: 1
+source_root: ../../..
+extends: ../embodied/default.yaml
+agent:
+  max_turns: 1200
+  max_tokens: 4096
+  planner_timeout_s: 86400
+  action_timeout_s: 180
+  invalid_action_retries: 2
+  reasoning_effort: none
+runtime:
+  context:
+    strategy: recent_turns
+    keep_turns: 8
+  trace:
+    mode: full

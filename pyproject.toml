@@ -58,6 +58,13 @@ Documentation = "https://github.com/OpenSenseNova/SenseNova-RoboRSI/tree/main/do
 runtime = [
     "pydantic-ai-harness>=0.34,<0.35",
 ]
+wetop = [
+    "genmanip-client @ https://github.com/Sage-PhysicalAI/genmanip-client/archive/fbfcd776639db82be3becdc6e39b5401f994da5c.tar.gz#sha256=50ae801544b6374fc392b38aea2f1f7ddd542b31c4d2ad1e7979fce055c9d37f",
+    "Pillow>=9.0",
+    "PyTurboJPEG>=1.7",
+    "opencv-python-headless>=4.8",
+    "filelock>=3",
+]
 test = [
     "roborsi[runtime]",
     "coverage",

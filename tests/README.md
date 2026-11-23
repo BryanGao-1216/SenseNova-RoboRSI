@@ -24,6 +24,7 @@ Focused checks:
 
 ```bash
 pytest tests/unit_tests/roborsi/evaluation tests/unit_tests/roborsi/agents -q
+pytest tests/unit_tests/roborsi/evaluation/test_wetop_online.py -q
 pytest tests/unit_tests/roborsi/benchmarks tests/unit_tests/robots/libero -q
 pytest tests/unit_tests/robots/bench2dex -q
 pytest tests/unit_tests/robots/dexjoco -q

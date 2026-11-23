@@ -124,6 +124,17 @@ remains a separate step in [`scripts/deploy/`](../scripts/deploy/README.md).
 See [model evaluation](../docs/model-evaluation.md) /
 [模型一键评测](../docs/model-evaluation.zh-CN.md) for commands and task coverage.
 
+## Volcengine Agent Plan / 火山引擎 Agent Plan
+
+[`models/volcengine_agent_plan.yaml`](models/volcengine_agent_plan.yaml) selects
+`kimi-k3.1-pro` through the Agent Plan endpoint and reads `ARK_API_KEY`.
+Use it with `evaluate_model.py --model-config`; optional `ARK_MODEL_NAME` and
+`ARK_BASE_URL` override the defaults. See the [English guide](../docs/volcengine-agent-plan.md)
+/ [中文指南](../docs/volcengine-agent-plan.zh-CN.md) for a one-task check and scope.
+
+使用独立的 Agent Plan 专属密钥环境变量 `ARK_API_KEY`，通过现有一键评测入口选择此模型文件。
+该配置不改变 GPT-6 专用脚本或各 benchmark 的 CLI provider 配置。
+
 ## GPT-6 Astra
 
 [`evaluations/gpt6.yaml`](evaluations/gpt6.yaml) selects all released benchmark

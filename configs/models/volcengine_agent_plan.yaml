@@ -1,0 +1,11 @@
+# Dedicated Volcengine Agent Plan connection for evaluate_model.py.
+# Use the Agent Plan API key, not a standard Ark API key.
+schema_version: 1
+provider: openai
+base_url: https://ark.cn-beijing.volces.com/api/plan/v3
+base_url_env: ARK_BASE_URL
+model_name: kimi-k3.1-pro
+model_name_env: ARK_MODEL_NAME
+api_key_env: ARK_API_KEY
+# Reuse the existing OpenAI-compatible Chat Completions client.
+openai_format: chat

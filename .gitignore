@@ -29,3 +29,5 @@ build/
 
 # Dashboard DOM test dependencies.
 node_modules/
+
+eval.sh

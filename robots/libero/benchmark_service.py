@@ -61,7 +61,9 @@ class LiberoBenchmark:
     def assets(self) -> list[dict]:
         from roborsi.benchmarks.registry import directory_sha256
 
-        root = Path("/roborsi/assets/libero")
+        root = Path(
+            get_project_env("ROBORSI_LIBERO_ASSETS_ROOT", "/roborsi/assets/libero")
+        )
         return [
             {"name": "libero", "kind": "directory", "sha256": directory_sha256(root)}
         ]

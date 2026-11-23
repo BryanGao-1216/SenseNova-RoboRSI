@@ -5,6 +5,63 @@ It pins Python 3.11, MuJoCo 3.3.0, robosuite 1.5.2 and the RLinf environment
 wrapper. OSMesa provides CPU rendering. Agents run separately; results, camera
 files and logs cross HTTP without mounting the Runner output directory.
 
+## Run inside an existing Linux container
+
+An existing Linux x86-64 container can run the simulator as an ordinary Python
+HTTP service, without a nested Docker daemon or a host Docker socket. Use
+Python 3.11 and install these system packages inside the container (Ubuntu root):
+
+```bash
+apt-get update
+apt-get install -y --no-install-recommends \
+  gcc libc6-dev linux-libc-dev libosmesa6 libgl1 libglib2.0-0 ca-certificates
+```
+
+From the checkout root, prepare a dedicated simulator venv on persistent storage:
+
+```bash
+python scripts/evaluation/libero_native.py prepare \
+  --python python3.11 --work-dir /data/roborsi/libero-native
+python scripts/evaluation/libero_native.py serve \
+  --work-dir /data/roborsi/libero-native --suite libero_spatial --seed 0 --port 18800
+```
+
+The helper reuses the locked dependencies, source versions and checksums from
+this benchmark's Dockerfile, downloads and validates assets, and writes local
+LIBERO paths. Its CPU PyTorch/NumPy dependencies are isolated from the Agent
+environment. Preparation makes no model calls. Rerunning it reuses verified
+assets but still checks dependencies and reinstalls sources.
+
+Keep the service terminal running. In a second terminal with the framework
+installed, check `curl --fail http://127.0.0.1:18800/v1/health`, then execute the
+fixed-action example below using `--benchmark-url libero=http://127.0.0.1:18800`
+instead of `--registry-root`. A task failure is expected; it checks real
+simulation and artifacts without calling a model. A health check alone does not
+exercise rendering or prove task execution.
+
+For Kimi, set `ARK_API_KEY` in the Agent environment and run:
+
+```bash
+python scripts/evaluation/evaluate_model.py \
+  --benchmark libero --benchmark-url libero=http://127.0.0.1:18800 \
+  --model-config configs/models/volcengine_agent_plan.yaml \
+  --work-dir /data/roborsi/libero-eval \
+  --task libero:0 --seed 0 --max-tokens 16384 --run-id kimi-native-001
+```
+
+`--benchmark-url` selects the existing service and skips Docker preparation.
+The server owns simulator assets and catalog selection; changing the client
+suite environment variable does not change an existing server. The service
+defaults to loopback, seed 0 and 600 physical steps. `--max-steps` changes the
+evaluation condition. `ROBORSI_LIBERO_ASSETS_ROOT` selects its asset directory;
+the default remains `/roborsi/assets/libero` for existing images.
+
+Offline helper tests do not establish native installation, OSMesa rendering or
+model task success. Those need validation on the target Linux host. Reusing
+native sources and dependencies does not prove the operating system matches the
+published image; no Docker image digest is recorded for this deployment.
+See the [Chinese guide](../../docs/libero-native.zh-CN.md) for the full sequence.
+
 ## Build and prepare assets
 
 Install the framework first, then use an absolute workspace outside the checkout.

@@ -30,6 +30,7 @@ from urllib.parse import urlsplit
 import numpy as np
 import yaml
 from jsonschema import Draft202012Validator
+from jsonschema.exceptions import ValidationError as JsonSchemaValidationError
 
 from roborsi.agents.config import AgentConfig
 from roborsi.evaluation.media import CaseMediaChannel
@@ -215,14 +216,36 @@ def action_schema(max_chunk_steps: int = 60) -> dict[str, Any]:
         "maximum": max_chunk_steps,
         "description": "Repeat this absolute target for this many native simulation steps, then observe. This is not interpolation.",
     }
+    positions = vector(
+        16,
+        "6 left arm joints, 2 left fingers, 6 right arm joints, 2 right fingers; absolute native joint units. Only for joint_position control.",
+    )
     return {
         "type": "object",
+        # OpenAI-compatible SDKs add an empty `properties` and forbid extra
+        # fields when they are absent. A union with fields only in its branches
+        # then rejects EVERY valid native action after provider transformation.
+        # Declare the complete field set at the root, while keeping the union
+        # below to enforce the required fields for each control mode.
+        "properties": {
+            "control_type": {
+                "type": "string",
+                "enum": ["ee_pose", "joint_position"],
+                "description": "Choose ee_pose with left/right targets, or joint_position with positions. Supply only the fields for the chosen control mode.",
+            },
+            "left": arm,
+            "right": arm,
+            "positions": positions,
+            "steps": steps,
+        },
+        "required": ["control_type", "steps"],
+        "additionalProperties": False,
         "oneOf": [
             {
                 "type": "object",
                 "additionalProperties": False,
                 "properties": {
-                    "control_type": {"const": "ee_pose"},
+                    "control_type": {"type": "string", "const": "ee_pose"},
                     "left": arm,
                     "right": arm,
                     "steps": steps,
@@ -233,11 +256,8 @@ def action_schema(max_chunk_steps: int = 60) -> dict[str, Any]:
                 "type": "object",
                 "additionalProperties": False,
                 "properties": {
-                    "control_type": {"const": "joint_position"},
-                    "positions": vector(
-                        16,
-                        "6 left arm joints, 2 left fingers, 6 right arm joints, 2 right fingers; absolute native joint units.",
-                    ),
+                    "control_type": {"type": "string", "const": "joint_position"},
+                    "positions": positions,
                     "steps": steps,
                 },
                 "required": ["control_type", "positions", "steps"],
@@ -807,7 +827,13 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0
     except (Exception, KeyboardInterrupt) as exc:
-        message = str(exc)
+        # jsonschema's full string repeats the entire tool schema. Retain the
+        # actionable validation reason; raw tool calls remain in the trace.
+        message = (
+            exc.message if isinstance(exc, JsonSchemaValidationError) else str(exc)
+        )
+        if isinstance(exc, JsonSchemaValidationError) and "directory" in locals():
+            message += f"; see the episode trace under {directory}"
         for name in (
             args.token_env,
             profile.api_key_env if "profile" in locals() else "ARK_API_KEY",

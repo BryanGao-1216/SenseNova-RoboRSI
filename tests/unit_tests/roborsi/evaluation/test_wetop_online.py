@@ -19,7 +19,7 @@ from urllib.parse import urlsplit
 
 import numpy as np
 import pytest
-from jsonschema import ValidationError
+from jsonschema import Draft202012Validator, ValidationError
 from PIL import Image
 
 from roborsi.evaluation.media import CaseMediaChannel
@@ -225,6 +225,48 @@ def test_zero_quaternion_is_rejected():
     data["left"]["quaternion"] = [0.0] * 4
     with pytest.raises(ValueError, match="quaternion"):
         native_actions(action(data), "0", 60)
+
+
+@pytest.mark.parametrize("data", [ee_action(), joint_action()])
+def test_native_actions_remain_valid_after_provider_schema_transform(data):
+    from pydantic_ai.profiles.openai import OpenAIJsonSchemaTransformer
+
+    schema = action_schema()
+    transformed = OpenAIJsonSchemaTransformer(schema).walk()
+    Draft202012Validator(transformed).validate(data)
+    assert not Draft202012Validator(transformed).is_valid({})
+
+
+def test_empty_model_call_is_repaired_before_any_physical_action(tmp_path, monkeypatch):
+    from pydantic_ai.messages import ModelResponse, ToolCallPart, ToolReturnPart
+    from pydantic_ai.models.function import FunctionModel
+
+    from roborsi.llm import LLMConfig
+
+    feedback = []
+    calls = []
+
+    def model(messages, info):
+        calls.append(messages)
+        if len(calls) == 1:
+            return ModelResponse(parts=[ToolCallPart("roborsi_action", {})])
+        feedback.extend(
+            json.loads(part.content) if isinstance(part.content, str) else part.content
+            for message in messages
+            for part in message.parts
+            if isinstance(part, ToolReturnPart)
+        )
+        assert feedback[-1]["error"] == "invalid_action"
+        return ModelResponse(parts=[ToolCallPart("roborsi_action", ee_action())])
+
+    monkeypatch.setattr(LLMConfig, "build_model", lambda self: FunctionModel(model))
+    monkeypatch.setenv("ARK_API_KEY", "offline-fake-key")
+    profile = ModelProfile.load(ROOT / "configs/models/volcengine_agent_plan.yaml")
+    config = profile.agent_config(ROOT / "configs/agents/wetop/online.yaml", [])
+    client = FakeClient([response(native()), response(None, result())])
+    summary = run_online(client, agent_factory(config, profile), tmp_path)
+    assert summary["completed"] and len(calls) == 2
+    assert len(client.requests) == 1 and len(feedback) == 1
 
 
 def test_rollover_resets_dialogue_and_preserves_native_partial_scores(tmp_path):
@@ -478,6 +520,12 @@ def test_kimi_chat_request_carries_images_schema_and_tool_feedback(
         tool = body["tools"][0]["function"]
         assert tool["name"] == "roborsi_action"
         assert tool["parameters"]["type"] == "object"
+        # Validate the actual wire schema, after the provider has rewritten it.
+        # The old branch-only schema acquired properties={} and rejected every
+        # nonempty action, despite accepting them before this rewrite.
+        Draft202012Validator(tool["parameters"]).validate(ee_action())
+        Draft202012Validator(tool["parameters"]).validate(joint_action())
+        assert not Draft202012Validator(tool["parameters"]).is_valid({})
         assert "private_goal_pose" not in json.dumps(body)
         call = {
             "id": f"call_{len(requests)}",

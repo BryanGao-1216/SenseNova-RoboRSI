@@ -93,6 +93,33 @@ gmp online ready \
 只有返回 `data.ready: true` 且带有 endpoint 时才能启动。若提示任务达到上限，
 先确认使用的是已有任务；平台配额问题需在平台处理。
 
+## 查看运行过程和可视化
+
+`Connected to server` 表示评测服务已连接；`Polling reset result` 表示平台 worker
+正在准备场景。此时还没有取得初始观测，Kimi 尚未开始决策。
+收到 `Reset complete`、`Environment reset complete` 后，才会处理任务观测。
+
+`Save process: False` 和 `Save result: False` 只关闭官方 SDK 的录制；本项目仍在
+`work/wetop-online/` 保存图像、交互轨迹和原始结果。
+当前记录的是每次 Agent 决策看到的相机图像，未开启连续视频录制。
+
+开始模型决策后，找出回合的轨迹文件：
+
+```bash
+find work/wetop-online -path '*/trace/events.jsonl'
+```
+
+将其中一个路径末尾的 `/trace/events.jsonl` 去掉，得到该回合目录，导出 HTML：
+
+```bash
+python -m roborsi.cli.trajectory '上面得到的完整回合目录' \
+  --output /gaowenbin/roborsi-work/wetop-report-001
+```
+
+报告输出目录必须是新目录或空目录。将整个 `wetop-report-001` 文件夹下载到本机，
+用浏览器打开其中的 `index.html`，即可查看相机图像、已记录的模型回复、工具动作和 token 统计。
+最终原生成绩在本次运行目录的 `summary.json` 中。
+
 ## 客户端导入失败
 
 Ubuntu 20.04 的系统 JPEG 库是 2.x，需使用 `PyTurboJPEG<2`。PyTurboJPEG 2.x
@@ -106,5 +133,16 @@ uv pip install --python .venv/bin/python -e '.[runtime,wetop]' 'PyTurboJPEG>=1.7
 
 这个验证不会连接平台或调用模型。如果仍失败，完整 traceback 会显示缺少的 Python 包、
 原生库或符号。导入成功后，再执行 `bash eval.sh`。
+
+## 初始化后出现空动作 `{}` 校验错误
+
+`ValidationError: {} is not valid under any of the given schemas` 表示 Agent 动作参数校验失败，
+不是场景初始化失败。旧版动作 schema 只有 `oneOf` 分支内的参数，经过 OpenAI 兼容 SDK
+转换后会产生空的顶层参数表，并禁止额外字段，导致有效动作也无法通过。
+适配器已补齐顶层参数定义，同时保留两种控制模式各自的完整校验。
+
+同步最新的 `roborsi/evaluation/wetop_online.py` 后，直接重跑 `bash eval.sh`，沿用已有
+任务 ID。空动作不会被送往模拟器，也不会被替换成零动作；模型仍需生成通过校验的动作。
+错误后的 `Client closed` 只表示客户端已清理连接，不代表评测完成或取得成绩。
 
 不要将填写真实 Key 和 Token 后的 `eval.sh` 提交到 Git 或公开分享。

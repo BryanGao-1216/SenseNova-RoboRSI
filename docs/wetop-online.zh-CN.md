@@ -58,7 +58,7 @@ gmp online submit \
   --benchmark_set wet_op_bench_test \
   --model_name RoboRSI-Kimi-K3.1-Pro \
   --model_type LLM-Agent \
-  --submitter_name 'your-name' \
+  --submitter_name 'gwb' \
   --submitter_homepage 'https://your-homepage.example' \
   --is_public 0
 ```

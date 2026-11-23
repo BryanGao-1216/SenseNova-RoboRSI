@@ -145,17 +145,21 @@ class ModelProfile:
                 raise ValueError("base_url must be a URL or null")
             base_url = _url(base_url)
         api_format = document.get("openai_format", "chat")
-        if api_format not in {"chat", "responses"}:
-            raise ValueError("openai_format must be chat or responses")
+        if api_format not in {None, "chat", "responses"}:
+            raise ValueError("openai_format must be chat, responses or null")
+        llm = {
+            "provider": "openai",
+            "model": model,
+            "base_url": base_url,
+            "parallel_tool_calls": False,
+        }
+        # The original OpenAI profile uses null to retain the Agent preset's
+        # API choice. The WET-OP preset inherits Responses from the generic Agent.
+        if api_format is not None:
+            llm["openai_format"] = api_format
         return cls(
             path,
-            {
-                "provider": "openai",
-                "model": model,
-                "base_url": base_url,
-                "openai_format": api_format,
-                "parallel_tool_calls": False,
-            },
+            llm,
             document.get("api_key_env", "OPENAI_API_KEY"),
         )
 

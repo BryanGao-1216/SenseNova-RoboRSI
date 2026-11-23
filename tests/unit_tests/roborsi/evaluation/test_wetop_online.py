@@ -400,6 +400,18 @@ def test_offline_check_reports_missing_credentials_without_network(monkeypatch, 
     assert not data["model_key_present"] and not data["platform_token_present"]
 
 
+def test_original_openai_profile_preserves_agent_responses_format(monkeypatch):
+    monkeypatch.delenv("GPT6_MODEL_NAME", raising=False)
+    monkeypatch.delenv("GPT6_BASE_URL", raising=False)
+    profile = ModelProfile.load(ROOT / "configs/models/gpt6.yaml")
+    config = profile.agent_config(ROOT / "configs/agents/wetop/online.yaml", [])
+    llm = config.runtime().llm
+    assert profile.api_key_env == "OPENAI_API_KEY"
+    assert llm.model == "gpt-6-astra"
+    assert llm.base_url == "https://api.openai.com/v1"
+    assert llm.openai_format == "responses"
+
+
 def test_live_run_requires_endpoint_and_credentials(capsys):
     assert main(["run"]) == 1
     assert "endpoint" in capsys.readouterr().err

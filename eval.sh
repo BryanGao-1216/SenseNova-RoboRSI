@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 
-export ARK_API_KEY='你的 Agent Plan 专属 Key'
-export EBENCH_SUBMIT_TOKEN='你的评测平台 Token'
-export EBENCH_TASK_ID='已有 WET-OP 任务的 task_id'
-export EBENCH_ONLINE_ENDPOINT='该任务返回的 endpoint 完整地址'
+export ARK_API_KEY='ARK_API_KEY'
+export EBENCH_SUBMIT_TOKEN='EBENCH_SUBMIT_TOKEN'
+export EBENCH_TASK_ID='EBENCH_TASK_ID'
+export EBENCH_ONLINE_ENDPOINT='EBENCH_ONLINE_ENDPOINT'
 
 python scripts/evaluation/wetop_online.py run \
   --model-config configs/models/volcengine_agent_plan.yaml \

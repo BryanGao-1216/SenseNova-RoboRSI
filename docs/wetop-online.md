@@ -77,6 +77,29 @@ traces. Credentials are supplied in memory, not saved in configuration records.
 `completed` means the remote worker has no remaining tasks; `limited` means this
 client stopped after the requested number of scored episodes.
 
+Timing is enabled by default; the existing launch command needs no new flags.
+Startup, reset, Agent construction, observation/image preparation, Agent decision
+wait, action conversion, cloud requests, recording and cleanup are timed with a
+monotonic clock. Every round prints stage durations, cumulative wall time and
+requested/executed native steps (unknown if the SDK exposes no counter).
+The Agent stage includes context/image assembly, API requests/retries and tool
+validation, including lazy initialization on the first decision. Cloud time wraps
+the entire SDK call, including network, simulation, decoding and possible automatic
+reset; it cannot isolate server physics time. These are wall times, not replay
+video durations.
+
+Completion, local limits, exceptions and Ctrl+C print final per-stage totals,
+percentages, counts, averages, maxima and failed/interrupted counts, including
+cleanup. Disjoint stages and unclassified overhead account for the wall time from
+configuration preparation through cleanup and trace analysis, excluding Python
+startup and the final report output itself. Forced process termination cannot
+produce an exit report. `summary.json` adds `timing` and `model_api_timing`;
+`decision_timing` events record rounds with a received cloud response. Interrupted
+stage times are included, without claiming an unconfirmed action executed.
+Recorded model API attempts, retries and durations are also summarized from Agent
+traces, as a subset rather than an additional wall-time category. Attempt durations
+exclude retry backoff; absent events are marked unavailable, not measured zero.
+
 The integration reuses the generic Agent's recent-eight-turn context and trace
 support. It does not supply a WET-OP-trained VLA or an automatic RSI training loop.
 Offline coverage uses simulated platform responses and the real EmbodiedAgent

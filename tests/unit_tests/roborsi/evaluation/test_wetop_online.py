@@ -28,6 +28,8 @@ from roborsi.evaluation.wetop_online import (
     BENCHMARK,
     ROOT,
     ModelProfile,
+    RunTiming,
+    _model_api_timing,
     action_schema,
     agent_factory,
     main,
@@ -151,6 +153,213 @@ def fake_factory(agents):
         return agent
 
     return build
+
+
+class ManualClock:
+    def __init__(self):
+        self.value = 0.0
+
+    def __call__(self):
+        return self.value
+
+    def advance(self, seconds):
+        self.value += seconds
+
+
+def test_stage_timings_distinguish_agent_cloud_and_local_work(
+    tmp_path, monkeypatch, capsys
+):
+    import roborsi.evaluation.wetop_online as online
+
+    clock = ManualClock()
+    timing = RunTiming(clock)
+    original_observation, original_actions = online.observation, online.native_actions
+
+    def prepare(*args):
+        clock.advance(0.5)
+        return original_observation(*args)
+
+    def convert(*args):
+        clock.advance(0.25)
+        return original_actions(*args)
+
+    monkeypatch.setattr(online, "observation", prepare)
+    monkeypatch.setattr(online, "native_actions", convert)
+
+    class TimedAgent(FakeAgent):
+        def act(self, obs):
+            clock.advance(20)
+            return super().act(obs)
+
+        def observe_end(self, step):
+            clock.advance(0.75)
+            super().observe_end(step)
+
+        def close(self):
+            clock.advance(0.5)
+            super().close()
+
+    class TimedClient(FakeClient):
+        step_count = 0
+
+        def reset(self):
+            clock.advance(7)
+            return super().reset()
+
+        def step(self, request):
+            clock.advance(6)
+            self.step_count += 1  # Cloud ends the requested two-step chunk early.
+            return super().step(request)
+
+        def close(self):
+            clock.advance(1)
+            super().close()
+
+    agents = []
+
+    def build(*args):
+        clock.advance(2)
+        agent = TimedAgent(*args)
+        agents.append(agent)
+        return agent
+
+    client = TimedClient([response(native()), response(None, result())])
+    summary = run_online(client, build, tmp_path, timing=timing)
+    phases = summary["timing"]["phases"]
+    assert summary["timing"]["wall_s"] == 38
+    assert summary["timing"]["accounted_s"] == 38
+    assert summary["timing"]["other_s"] == 0
+    assert phases["agent_decision"]["total_s"] == 20
+    assert phases["cloud_step"]["total_s"] == 6
+    assert phases["observation_prepare"]["total_s"] == 0.5
+    assert phases["client_close"]["total_s"] == 1
+    assert phases["agent_close"]["total_s"] == 0.5
+    assert summary == json.loads((tmp_path / "summary.json").read_text())
+    events = [
+        json.loads(line)
+        for line in (tmp_path / "events.jsonl").read_text().splitlines()
+    ]
+    round_event = next(item for item in events if item["type"] == "decision_timing")
+    assert round_event["requested_steps"] == 2 and round_event["executed_steps"] == 1
+    assert round_event["round_s"] == 28.75
+    assert round_event["phases_s"]["agent_decision"] == 20
+    assert round_event["phases_s"]["cloud_step"] == 6
+    output = capsys.readouterr().out
+    assert "Agent=20.000s" in output and "云端=6.000s" in output
+    assert "原生步请求/执行=2/1" in output
+    assert output.count("[耗时统计]") == 1
+    assert "实际总耗时=38.000s" in output
+    clock.advance(100)
+    assert timing.snapshot()["wall_s"] == 38  # Final snapshot is frozen.
+    assert client.closed == agents[0].closed == 1
+
+
+@pytest.mark.parametrize("phase", ["environment_reset", "agent_decision", "cloud_step"])
+@pytest.mark.parametrize("failure_type", [RuntimeError, KeyboardInterrupt])
+def test_failed_or_interrupted_stage_is_in_final_timings(
+    tmp_path, capsys, phase, failure_type
+):
+    clock = ManualClock()
+
+    def fail():
+        clock.advance(13)
+        raise failure_type("offline failure")
+
+    class FailingClient(FakeClient):
+        def reset(self):
+            if phase == "environment_reset":
+                fail()
+            return super().reset()
+
+        def step(self, request):
+            assert phase == "cloud_step"
+            self.requests.append(request)
+            fail()
+
+    class FailingAgent(FakeAgent):
+        def act(self, obs):
+            if phase == "agent_decision":
+                fail()
+            return super().act(obs)
+
+    client = FailingClient([response(native())])
+    with pytest.raises(failure_type):
+        run_online(client, FailingAgent, tmp_path, timing=RunTiming(clock))
+    summary = json.loads((tmp_path / "summary.json").read_text())
+    assert summary["status"] == (
+        "interrupted" if failure_type is KeyboardInterrupt else "error"
+    )
+    assert summary["timing"]["wall_s"] == 13
+    assert summary["timing"]["phases"][phase] == {
+        "count": 1,
+        "failed_count": 1,
+        "total_s": 13,
+        "max_s": 13,
+        "mean_s": 13,
+    }
+    assert summary["decisions"] == 0 and summary["scored_episodes"] == 0
+    assert client.closed == 1
+    output = capsys.readouterr().out
+    assert output.count("[耗时统计]") == 1 and "13.000s" in output
+
+
+def test_client_connection_interrupt_prints_and_saves_startup_timings(
+    tmp_path, monkeypatch, capsys
+):
+    import roborsi.evaluation.wetop_online as online
+
+    clock = ManualClock()
+    timing = RunTiming(clock)
+    monkeypatch.setattr(online, "RunTiming", lambda: timing)
+    module = ModuleType("genmanip_client")
+
+    def connect(**kwargs):
+        clock.advance(4)
+        raise KeyboardInterrupt()
+
+    module.EvalClient = connect
+    monkeypatch.setitem(sys.modules, "genmanip_client", module)
+    monkeypatch.setenv("ARK_API_KEY", "offline-fake-key")
+    monkeypatch.setenv("EBENCH_SUBMIT_TOKEN", "offline-platform-token")
+    assert (
+        main(
+            [
+                "run",
+                "--endpoint",
+                "https://example.org/eval",
+                "--run-id",
+                "offline-run",
+                "--output-dir",
+                str(tmp_path),
+            ]
+        )
+        == 130
+    )
+    summary = json.loads((tmp_path / "summary.json").read_text())
+    assert summary["status"] == "interrupted"
+    assert summary["timing"]["phases"]["client_setup"]["total_s"] == 4
+    assert capsys.readouterr().out.count("[耗时统计]") == 1
+
+
+def test_api_subtotals_use_recorded_attempts_without_double_counting_requests(tmp_path):
+    trace = tmp_path / "episodes/one/trace/events.jsonl"
+    trace.parent.mkdir(parents=True)
+    events = [
+        {"type": "model_attempt_end", "payload": {"elapsed_s": 5, "status": "error"}},
+        {"type": "model_retry", "payload": {"retry_delay_s": 2}},
+        {
+            "type": "model_attempt_end",
+            "payload": {"elapsed_s": 10, "status": "completed"},
+        },
+        {"type": "model_request_end", "payload": {"elapsed_s": 17}},
+    ]
+    trace.write_text("\n".join(json.dumps(item) for item in events) + '\n{"partial":')
+    stats = _model_api_timing(tmp_path)
+    assert stats["available"] is True
+    assert stats["attempt_count"] == 2 and stats["failed_attempt_count"] == 1
+    assert stats["retry_count"] == 1 and stats["total_s"] == 15
+    assert stats["mean_s"] == 7.5 and stats["max_s"] == 10
+    assert stats["read_errors"] == 1
 
 
 def test_observation_keeps_rgb_names_and_public_state_only(tmp_path):
@@ -690,7 +899,12 @@ def test_kimi_chat_request_carries_images_schema_and_tool_feedback(
             response(None, result()),
         ]
     )
-    assert run_online(client, agent_factory(config, profile), tmp_path)["completed"]
+    summary = run_online(client, agent_factory(config, profile), tmp_path)
+    assert summary["completed"]
+    assert summary["model_api_timing"]["available"] is True
+    assert summary["model_api_timing"]["attempt_count"] == 2
+    assert summary["model_api_timing"]["retry_count"] == 0
+    assert summary["timing"]["phases"]["agent_decision"]["count"] == 2
     assert len(requests) == 2
     image_count = sum(
         part.get("type") == "image_url"

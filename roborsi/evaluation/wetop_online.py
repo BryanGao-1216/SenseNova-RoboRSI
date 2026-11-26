@@ -19,8 +19,9 @@ import math
 import os
 import re
 import sys
+import time
 from collections.abc import Callable
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager, nullcontext
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -433,10 +434,166 @@ def observation(native: dict, channel: CaseMediaChannel, step: int) -> Observati
     return result
 
 
+_TIMING_PHASES = {
+    "configuration": "配置准备",
+    "sdk_import": "SDK 加载",
+    "client_setup": "客户端连接",
+    "environment_reset": "环境初始化/重置",
+    "episode_setup": "回合与 Agent 创建",
+    "observation_prepare": "观测处理/图像落盘",
+    "agent_decision": "Agent 决策等待",
+    "action_prepare": "动作校验/转换",
+    "cloud_step": "云端动作请求",
+    "recording": "结果与日志落盘",
+    "episode_finish": "回合结束反馈",
+    "agent_close": "Agent 清理",
+    "client_close": "客户端清理",
+}
+
+
+class RunTiming:
+    """Measure disjoint client-side stages, including failed/interrupted calls."""
+
+    def __init__(self, clock: Callable[[], float] | None = None) -> None:
+        self.clock = clock or time.perf_counter
+        self.started = self.clock()
+        self.finished: float | None = None
+        self.reported = False
+        self.phases: dict[str, dict[str, float | int]] = {}
+
+    @contextmanager
+    def measure(self, phase: str, *, announce: bool = False):
+        label = _TIMING_PHASES[phase]
+        if announce:
+            print(f"[计时] {label}开始…", flush=True)
+        started = self.clock()
+        failed = False
+        try:
+            yield
+        except BaseException:
+            failed = True
+            raise
+        finally:
+            elapsed = max(0.0, self.clock() - started)
+            stats = self.phases.setdefault(
+                phase, {"count": 0, "failed_count": 0, "total_s": 0.0, "max_s": 0.0}
+            )
+            stats["count"] += 1
+            stats["failed_count"] += int(failed)
+            stats["total_s"] += elapsed
+            stats["max_s"] = max(stats["max_s"], elapsed)
+            if announce:
+                state = "失败/中断" if failed else "完成"
+                print(f"[计时] {label}{state}: {elapsed:.3f}s", flush=True)
+
+    def totals(self) -> dict[str, float]:
+        return {key: float(value["total_s"]) for key, value in self.phases.items()}
+
+    def snapshot(self) -> dict:
+        end = self.clock() if self.finished is None else self.finished
+        wall = max(0.0, end - self.started)
+        accounted = sum(self.totals().values())
+        return {
+            "unit": "seconds",
+            "wall_s": round(wall, 6),
+            "accounted_s": round(accounted, 6),
+            "other_s": round(max(0.0, wall - accounted), 6),
+            "phases": {
+                phase: {
+                    **stats,
+                    "total_s": round(float(stats["total_s"]), 6),
+                    "mean_s": round(float(stats["total_s"]) / stats["count"], 6),
+                    "max_s": round(float(stats["max_s"]), 6),
+                }
+                for phase, stats in self.phases.items()
+            },
+        }
+
+    def finish(self) -> None:
+        if self.finished is None:
+            self.finished = self.clock()
+
+    def report(self, status: str, decisions: int = 0, episodes: int = 0) -> None:
+        if self.reported:
+            return
+        self.reported = True
+        data = self.snapshot()
+        wall = data["wall_s"]
+        print(
+            f"\n[耗时统计] 状态={status} | 已返回动作请求={decisions} | "
+            f"已评分回合={episodes} | 实际总耗时={wall:.3f}s ({wall / 60:.2f}分钟)",
+            flush=True,
+        )
+        for phase, label in _TIMING_PHASES.items():
+            stats = data["phases"].get(phase)
+            if stats is None:
+                continue
+            share = 100 * stats["total_s"] / wall if wall else 0.0
+            print(
+                f"  {label}: 合计={stats['total_s']:.3f}s ({share:.1f}%) | "
+                f"次数={stats['count']} | 平均={stats['mean_s']:.3f}s | "
+                f"最长={stats['max_s']:.3f}s | 失败/中断={stats['failed_count']}",
+                flush=True,
+            )
+        print(f"  其它本地开销: {data['other_s']:.3f}s", flush=True)
+
+
+def _model_api_timing(directory: Path) -> dict:
+    """Summarize provider attempts already recorded in the Agent trace."""
+    attempts = failed = retries = incomplete = files = 0
+    elapsed = longest = 0.0
+    for path in directory.glob("episodes/*/trace/events.jsonl"):
+        files += 1
+        try:
+            with path.open(encoding="utf-8") as stream:
+                for line in stream:
+                    try:
+                        event = json.loads(line)
+                    except ValueError:
+                        incomplete += 1
+                        continue
+                    if not isinstance(event, dict) or not isinstance(
+                        event.get("payload", {}), dict
+                    ):
+                        incomplete += 1
+                        continue
+                    payload = event.get("payload", {})
+                    if event.get("type") == "model_retry":
+                        retries += 1
+                    if event.get("type") != "model_attempt_end":
+                        continue
+                    duration = payload.get("elapsed_s")
+                    if (
+                        not isinstance(duration, (int, float))
+                        or not math.isfinite(duration)
+                        or duration < 0
+                    ):
+                        incomplete += 1
+                        continue
+                    attempts += 1
+                    failed += int(payload.get("status") != "completed")
+                    elapsed += duration
+                    longest = max(longest, duration)
+        except OSError:
+            incomplete += 1
+    return {
+        "source": "recorded_model_attempt_end_events",
+        "available": attempts > 0,
+        "trace_files": files,
+        "attempt_count": attempts,
+        "failed_attempt_count": failed,
+        "retry_count": retries,
+        "total_s": round(elapsed, 6),
+        "mean_s": round(elapsed / attempts, 6) if attempts else None,
+        "max_s": round(longest, 6) if attempts else None,
+        "read_errors": incomplete,
+    }
+
+
 class RunLog:
     """Record public observations, executed action requests and native results."""
 
-    def __init__(self, directory: Path) -> None:
+    def __init__(self, directory: Path, timing: RunTiming) -> None:
         self.directory = directory.resolve()
         self.directory.mkdir(parents=True, exist_ok=True)
         if any(self.directory.iterdir()):
@@ -447,6 +604,8 @@ class RunLog:
         self.metrics: dict = {}
         self.status = "running"
         self.decisions = 0
+        self.timing = timing
+        self.model_api_timing: dict | None = None
         self.event("run_started")
 
     def event(self, kind: str, **data: Any) -> None:
@@ -484,6 +643,8 @@ class RunLog:
             "scored_episodes": len(self.results),
             "episode_results": list(self.results.values()),
             "platform_metrics": self.metrics,
+            "timing": self.timing.snapshot(),
+            "model_api_timing": self.model_api_timing,
         }
         write_json_atomic(self.directory / "summary.json", result)
         return result
@@ -574,8 +735,10 @@ def run_online(
     max_decisions: int = 1000,
     max_episodes: int | None = None,
     run_metadata: dict | None = None,
+    timing: RunTiming | None = None,
 ) -> dict:
     """Drive one owned worker; SDK done means the whole job, not one episode."""
+    timing = timing or RunTiming()
     try:
         schema = action_schema(max_chunk_steps)
         if type(max_decisions) is not int or max_decisions < 1:
@@ -584,7 +747,7 @@ def run_online(
             type(max_episodes) is not int or max_episodes < 1
         ):
             raise ValueError("max_episodes must be positive")
-        log = RunLog(directory)
+        log = RunLog(directory, timing)
     except BaseException:
         client.close()
         raise
@@ -595,7 +758,12 @@ def run_online(
         nonlocal active
         previous, active = active, None
         if previous is not None:
-            previous.agent.close()
+            with timing.measure("agent_close"):
+                previous.agent.close()
+
+    def close_client() -> None:
+        with timing.measure("client_close", announce=True):
+            client.close()
 
     def end_active(result: dict | None, reason: str) -> None:
         if active is None:
@@ -610,27 +778,35 @@ def run_online(
                     step_index=active.decisions,
                     data={"terminal_observation_available": False},
                 )
-                active.agent.observe_end(
-                    StepResult(
-                        observation=terminal,
-                        terminated=True,
-                        truncated=False,
-                        termination_reason="platform_episode_ended",
-                        reward=float(result["score"]),
-                        native={"episode_result": result},
+                with timing.measure("episode_finish"):
+                    active.agent.observe_end(
+                        StepResult(
+                            observation=terminal,
+                            terminated=True,
+                            truncated=False,
+                            termination_reason="platform_episode_ended",
+                            reward=float(result["score"]),
+                            native={"episode_result": result},
+                        )
                     )
-                )
             log.event("dialogue_ended", episode_id=active.identity, reason=reason)
         finally:
             close_active()
 
     try:
         with ExitStack() as cleanup:
-            cleanup.callback(client.close)
+            cleanup.callback(close_client)
             cleanup.callback(close_active)
             if run_metadata is not None:
-                write_json_atomic(log.directory / "run.json", run_metadata)
-            response = client.reset()
+                with timing.measure("recording"):
+                    write_json_atomic(log.directory / "run.json", run_metadata)
+            print(
+                "[计时说明] 全部为实际耗时；Agent 决策包含上下文、模型 API/重试和动作校验；"
+                "云端请求包含网络、仿真、解码及可能的自动重置。",
+                flush=True,
+            )
+            with timing.measure("environment_reset", announce=True):
+                response = client.reset()
             done = False
             while True:
                 if not isinstance(response, dict) or not isinstance(
@@ -689,6 +865,8 @@ def run_online(
                 if max_episodes is not None and len(log.results) >= max_episodes:
                     log.status = "limited"
                     break
+                round_started = timing.clock()
+                phase_before = timing.totals()
                 if active is None:
                     attempts += 1
                     identity = native.get("episode_id")
@@ -698,13 +876,16 @@ def run_online(
                         raise ValueError("platform returned a completed episode again")
                     tag = hashlib.sha256(identity.encode()).hexdigest()[:12]
                     episode_dir = log.directory / "episodes" / f"{attempts:06d}-{tag}"
-                    episode_dir.mkdir(parents=True)
-                    channel = CaseMediaChannel(episode_dir / "media")
                     structure_path = episode_dir / "observation-structure.json"
-                    write_json_atomic(structure_path, observation_structure(native))
                     # Validate the first observation before constructing a planner.
                     try:
-                        current = observation(native, channel, 0)
+                        with timing.measure("observation_prepare"):
+                            episode_dir.mkdir(parents=True)
+                            channel = CaseMediaChannel(episode_dir / "media")
+                            write_json_atomic(
+                                structure_path, observation_structure(native)
+                            )
+                            current = observation(native, channel, 0)
                     except (TypeError, ValueError) as exc:
                         raise ValueError(
                             f"{exc}; observation layout: {structure_path}"
@@ -728,39 +909,51 @@ def run_online(
                         },
                         capabilities={"action_schema": schema},
                     )
-                    write_json_atomic(episode_dir / "task.json", task.as_dict())
-                    active = Episode(
-                        identity,
-                        build_agent(task, episode_dir, channel),
-                        channel,
-                        episode_dir,
-                    )
+                    with timing.measure("episode_setup", announce=True):
+                        write_json_atomic(episode_dir / "task.json", task.as_dict())
+                        active = Episode(
+                            identity,
+                            build_agent(task, episode_dir, channel),
+                            channel,
+                            episode_dir,
+                        )
                     log.event(
                         "dialogue_started",
                         episode_id=identity,
                         directory=episode_dir.relative_to(log.directory).as_posix(),
                     )
                 else:
-                    current = observation(native, active.channel, active.decisions)
+                    with timing.measure("observation_prepare"):
+                        current = observation(native, active.channel, active.decisions)
                 if active.decisions >= max_decisions:
                     raise RuntimeError(
                         "local decision limit reached before a native episode result"
                     )
-                log.event(
-                    "observation",
-                    directory=active.directory.relative_to(log.directory).as_posix(),
-                    observation=current.as_dict(),
-                )
-                action = active.agent.act(current)
-                if not isinstance(action, Action) or (
-                    action.benchmark,
-                    action.episode_id,
-                    action.step_index,
-                ) != (BENCHMARK, active.identity, active.decisions):
-                    raise ValueError(
-                        "Agent action does not match the current observation"
+                with timing.measure("recording"):
+                    log.event(
+                        "observation",
+                        directory=active.directory.relative_to(
+                            log.directory
+                        ).as_posix(),
+                        observation=current.as_dict(),
                     )
-                request = native_actions(action, worker_id, max_chunk_steps)
+                print(
+                    f"[进度] 回合 {attempts} | 决策 {active.decisions + 1} | "
+                    f"原生 timestep={native.get('timestep', 'unknown')}",
+                    flush=True,
+                )
+                with timing.measure("agent_decision", announce=True):
+                    action = active.agent.act(current)
+                with timing.measure("action_prepare"):
+                    if not isinstance(action, Action) or (
+                        action.benchmark,
+                        action.episode_id,
+                        action.step_index,
+                    ) != (BENCHMARK, active.identity, active.decisions):
+                        raise ValueError(
+                            "Agent action does not match the current observation"
+                        )
+                    request = native_actions(action, worker_id, max_chunk_steps)
                 native_action = (
                     request[0][worker_id]
                     if isinstance(request, list)
@@ -775,12 +968,14 @@ def run_online(
                     "native_action": native_action,
                     "delivery_state": "unconfirmed",
                 }
-                write_json_atomic(log.directory / "last-action.json", receipt)
-                log.event("action_requested", action=action.as_dict())
+                with timing.measure("recording"):
+                    write_json_atomic(log.directory / "last-action.json", receipt)
+                    log.event("action_requested", action=action.as_dict())
                 # Do not add an outer retry: only the official SDK can replay
                 # physical actions safely using its reliable-request protocol.
                 previous_steps = getattr(client, "step_count", None)
-                response, done = client.step(request)
+                with timing.measure("cloud_step", announce=True):
+                    response, done = client.step(request)
                 received_steps = getattr(client, "step_count", None)
                 receipt["delivery_state"] = "response_received"
                 receipt["executed_steps"] = (
@@ -788,17 +983,67 @@ def run_online(
                     if type(previous_steps) is int and type(received_steps) is int
                     else None
                 )
-                write_json_atomic(log.directory / "last-action.json", receipt)
-                log.event("action_response", **receipt)
                 active.decisions += 1
                 log.decisions += 1
-                log.save()
-        return log.save()
+                with timing.measure("recording"):
+                    write_json_atomic(log.directory / "last-action.json", receipt)
+                    log.event("action_response", **receipt)
+                    log.save()
+                round_s = timing.clock() - round_started
+                phases = {
+                    key: round(value - phase_before.get(key, 0.0), 6)
+                    for key, value in timing.totals().items()
+                    if value != phase_before.get(key, 0.0)
+                }
+                log.event(
+                    "decision_timing",
+                    episode_id=active.identity,
+                    step_index=active.decisions - 1,
+                    requested_steps=receipt["requested_steps"],
+                    executed_steps=receipt["executed_steps"],
+                    round_s=round(round_s, 6),
+                    wall_s=timing.snapshot()["wall_s"],
+                    phases_s=phases,
+                )
+                executed = receipt["executed_steps"]
+                print(
+                    f"[本轮耗时] 回合={attempts} 决策={active.decisions} | "
+                    f"创建={phases.get('episode_setup', 0):.3f}s | "
+                    f"观测={phases.get('observation_prepare', 0):.3f}s | "
+                    f"Agent={phases.get('agent_decision', 0):.3f}s | "
+                    f"动作转换={phases.get('action_prepare', 0):.3f}s | "
+                    f"云端={phases.get('cloud_step', 0):.3f}s | "
+                    f"落盘={phases.get('recording', 0):.3f}s | "
+                    f"本轮总计={round_s:.3f}s | "
+                    f"累计={timing.snapshot()['wall_s']:.3f}s | "
+                    f"原生步请求/执行={receipt['requested_steps']}/"
+                    f"{executed if executed is not None else 'unknown'}",
+                    flush=True,
+                )
     except BaseException as exc:
         log.status = "interrupted" if isinstance(exc, KeyboardInterrupt) else "error"
         log.event("run_error", error_type=type(exc).__name__)
-        log.save()
         raise
+    finally:
+        try:
+            with timing.measure("recording"):
+                log.model_api_timing = _model_api_timing(log.directory)
+        finally:
+            timing.finish()
+            timing.report(log.status, log.decisions, len(log.results))
+            api = log.model_api_timing
+            if api is not None and api["available"]:
+                print(
+                    f"  模型 API 子统计（已包含在上述阶段内，不重复相加）: "
+                    f"请求尝试={api['attempt_count']} | 失败={api['failed_attempt_count']} | "
+                    f"重试={api['retry_count']} | 合计={api['total_s']:.3f}s | "
+                    f"平均={api['mean_s']:.3f}s | 最长={api['max_s']:.3f}s",
+                    flush=True,
+                )
+            else:
+                print("  模型 API 子统计: 暂无已记录的请求耗时", flush=True)
+            summary = log.save()
+    return summary
 
 
 def _positive(value: str) -> int:
@@ -839,16 +1084,22 @@ def main(argv: list[str] | None = None) -> int:
         help="stop after this many native results; the remote job may remain incomplete",
     )
     args = parser.parse_args(argv)
+    timing = RunTiming() if args.command == "run" else None
+    startup_status = "error"
+    output_reserved = False
     try:
-        profile = ModelProfile.load(args.model_config)
-        config = profile.agent_config(args.agent_config, args.agent_set)
-        action_schema(args.max_chunk_steps)
-        if not re.fullmatch(r"[A-Za-z_]\w*", args.token_env):
-            raise ValueError("token-env must name an environment variable")
-        try:
-            sdk_version = importlib.metadata.version("genmanip-client")
-        except importlib.metadata.PackageNotFoundError:
-            sdk_version = None
+        with (
+            timing.measure("configuration", announce=True) if timing else nullcontext()
+        ):
+            profile = ModelProfile.load(args.model_config)
+            config = profile.agent_config(args.agent_config, args.agent_set)
+            action_schema(args.max_chunk_steps)
+            if not re.fullmatch(r"[A-Za-z_]\w*", args.token_env):
+                raise ValueError("token-env must name an environment variable")
+            try:
+                sdk_version = importlib.metadata.version("genmanip-client")
+            except importlib.metadata.PackageNotFoundError:
+                sdk_version = None
         if args.command == "check":
             print(
                 json.dumps(
@@ -879,16 +1130,17 @@ def main(argv: list[str] | None = None) -> int:
                 f"set both {args.token_env} and {profile.api_key_env} before running"
             )
         try:
-            import genmanip_client
+            with timing.measure("sdk_import", announce=True):
+                import genmanip_client
 
-            EvalClient = genmanip_client.EvalClient
+                EvalClient = genmanip_client.EvalClient
         except (ImportError, OSError, RuntimeError, AttributeError) as exc:
             raise RuntimeError(
                 f"GenManip EvalClient import failed in {sys.executable}: "
                 f"{type(exc).__name__}: {exc}. "
                 "Install .[runtime,wetop] into this same interpreter; "
                 "native libjpeg-turbo 2.x requires PyTurboJPEG<2. "
-                "See README.eval.zh-CN.md."
+                "See docs/wetop-online.zh-CN.md."
             ) from exc
         tag = hashlib.sha256(args.run_id.encode()).hexdigest()[:12]
         directory = (
@@ -904,15 +1156,17 @@ def main(argv: list[str] | None = None) -> int:
         if directory.exists() and any(directory.iterdir()):
             raise ValueError("output directory must be empty")
         directory.mkdir(parents=True, exist_ok=True)
+        output_reserved = True
         print(f"RoboRSI output directory: {directory}", flush=True)
-        client = EvalClient(
-            base_url=endpoint,
-            token=os.environ[args.token_env],
-            run_id=args.run_id,
-            worker_ids=[args.worker_id],
-            save_result=False,
-            save_process=False,
-        )
+        with timing.measure("client_setup", announce=True):
+            client = EvalClient(
+                base_url=endpoint,
+                token=os.environ[args.token_env],
+                run_id=args.run_id,
+                worker_ids=[args.worker_id],
+                save_result=False,
+                save_process=False,
+            )
         metadata = {
             "benchmark": BENCHMARK,
             "run_id": args.run_id,
@@ -936,6 +1190,7 @@ def main(argv: list[str] | None = None) -> int:
             max_decisions=args.max_decisions,
             max_episodes=args.max_episodes,
             run_metadata=metadata,
+            timing=timing,
         )
         print(
             json.dumps(
@@ -944,6 +1199,9 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0
     except (Exception, KeyboardInterrupt) as exc:
+        startup_status = (
+            "interrupted" if isinstance(exc, KeyboardInterrupt) else "error"
+        )
         # jsonschema's full string repeats the entire tool schema. Retain the
         # actionable validation reason; raw tool calls remain in the trace.
         message = (
@@ -960,6 +1218,24 @@ def main(argv: list[str] | None = None) -> int:
                 message = message.replace(secret, "[redacted]")
         print(f"{type(exc).__name__}: {message}", file=sys.stderr)
         return 130 if isinstance(exc, KeyboardInterrupt) else 1
+    finally:
+        if timing is not None and not timing.reported:
+            timing.finish()
+            timing.report(startup_status)
+            if output_reserved:
+                write_json_atomic(
+                    directory / "summary.json",
+                    {
+                        "status": startup_status,
+                        "completed": False,
+                        "decisions": 0,
+                        "scored_episodes": 0,
+                        "episode_results": [],
+                        "platform_metrics": {},
+                        "timing": timing.snapshot(),
+                        "model_api_timing": None,
+                    },
+                )
 
 
 if __name__ == "__main__":

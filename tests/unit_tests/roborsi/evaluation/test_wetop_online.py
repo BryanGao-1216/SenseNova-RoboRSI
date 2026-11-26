@@ -748,6 +748,30 @@ def test_original_openai_profile_preserves_agent_responses_format(monkeypatch):
     assert llm.openai_format == "responses"
 
 
+@pytest.mark.parametrize("model", ["kimi-k3.1-pro", "kimi-k3-1-pro-261024"])
+def test_kimi_thinking_cannot_be_disabled_before_loading_client(
+    monkeypatch, capsys, model
+):
+    monkeypatch.setenv("ARK_MODEL_NAME", model)
+    monkeypatch.delenv("ARK_API_KEY", raising=False)
+    monkeypatch.delenv("EBENCH_SUBMIT_TOKEN", raising=False)
+    assert main(["run", "--thinking", "disabled"]) == 1
+    assert "始终开启思考，不支持关闭" in capsys.readouterr().err
+
+
+def test_thinking_flag_preserves_original_openai_responses_protocol():
+    profile = ModelProfile.load(ROOT / "configs/models/gpt6.yaml")
+    config = profile.agent_config(
+        ROOT / "configs/agents/wetop/online.yaml",
+        [],
+        thinking="disabled",
+        reasoning_effort="low",
+    )
+    assert config.document["agent"]["reasoning_effort"] == "none"
+    assert config.runtime().llm.openai_format == "responses"
+    assert config.runtime().llm.extra_body is None
+
+
 def test_live_run_requires_endpoint_and_credentials(capsys):
     assert main(["run"]) == 1
     assert "endpoint" in capsys.readouterr().err
@@ -793,8 +817,18 @@ def test_chunk_limit_is_validated_before_any_remote_reset():
         action_schema(121)
 
 
-def test_kimi_chat_request_carries_images_schema_and_tool_feedback(
-    tmp_path, monkeypatch
+@pytest.mark.parametrize(
+    ("model_name", "thinking", "effort", "expected_extra"),
+    [
+        ("kimi-k3.1-pro", None, None, {}),
+        ("kimi-k3.1-pro", "enabled", "low", {"reasoning_effort": "low"}),
+        ("kimi-k3.1-pro", "enabled", "high", {"reasoning_effort": "high"}),
+        ("kimi-k3.1-pro", "enabled", "max", {"reasoning_effort": "max"}),
+        ("doubao-seed-2.1-lite", "disabled", "low", {"thinking": {"type": "disabled"}}),
+    ],
+)
+def test_chat_thinking_controls_reach_wire_with_images_and_tool_feedback(
+    tmp_path, monkeypatch, model_name, thinking, effort, expected_extra
 ):
     import httpx
     import pydantic_ai.providers.openai as providers
@@ -807,8 +841,13 @@ def test_kimi_chat_request_carries_images_schema_and_tool_feedback(
         requests.append(body)
         assert request.url.path == "/api/plan/v3/chat/completions"
         assert request.headers["authorization"] == "Bearer offline-fake-key"
-        assert body["model"] == "kimi-k3.1-pro"
+        assert body["model"] == model_name
         assert body["parallel_tool_calls"] is False
+        for key in ("thinking", "reasoning_effort"):
+            if key in expected_extra:
+                assert body[key] == expected_extra[key]
+            else:
+                assert key not in body
         tool = body["tools"][0]["function"]
         assert tool["name"] == "roborsi_action"
         assert tool["parameters"]["type"] == "object"
@@ -888,10 +927,15 @@ def test_kimi_chat_request_carries_images_schema_and_tool_feedback(
 
     monkeypatch.setattr(providers, "OpenAIProvider", provider)
     monkeypatch.setenv("ARK_API_KEY", "offline-fake-key")
-    monkeypatch.delenv("ARK_MODEL_NAME", raising=False)
+    monkeypatch.setenv("ARK_MODEL_NAME", model_name)
     monkeypatch.delenv("ARK_BASE_URL", raising=False)
     profile = ModelProfile.load(ROOT / "configs/models/volcengine_agent_plan.yaml")
-    config = profile.agent_config(ROOT / "configs/agents/wetop/online.yaml", [])
+    config = profile.agent_config(
+        ROOT / "configs/agents/wetop/online.yaml",
+        [],
+        thinking=thinking,
+        reasoning_effort=effort,
+    )
     client = FakeClient(
         [
             response(native()),

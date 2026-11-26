@@ -56,6 +56,38 @@ python scripts/evaluation/wetop_online.py check
 Agent 参数位于 `configs/agents/wetop/online.yaml`，可用 `--agent-config`、
 `--model-config` 或 `--agent-set 'agent.max_tokens=8192'` 指定。
 
+### 思考开关与强度
+
+根目录 `eval.sh` 增加两个可直接修改的变量：
+
+```bash
+THINKING='enabled'       # enabled / disabled；当前 Kimi 只支持 enabled
+REASONING_EFFORT='low'   # Kimi 可选 low / high / max
+```
+
+脚本将它们传给 `--thinking`、`--reasoning-effort`。当前默认使用 `enabled + low`，
+降低思考强度，实际提速与任务效果需要重新评测。启动时会打印模型、思考状态和请求强度，
+这些选择也会保存在 `run.json` 和展开的 Agent 配置里。
+
+**Kimi-K3.1-Pro 始终开启思考，不能关闭。** 原预设的 `agent.reasoning_effort: none`
+是框架的通用设置，不能据此判断 Kimi 服务端已经关闭思考。按
+[火山引擎官方说明](https://docs.volcengine.com/docs/ark/deep-thinking?lang=zh)，
+该模型使用 `reasoning_effort` 调节强度，不使用 `thinking.type`；本入口会把强度明确传入
+Chat API 请求体。`low` 仍是思考模式。
+
+对当前 Kimi 设置 `THINKING='disabled'` 会在加载客户端、分配 worker 或调用模型前报错。
+完全关闭思考需要先选择支持非思考模式的模型；对于这类火山 Chat 模型，`disabled` 会发送
+`thinking: {"type": "disabled"}`，并忽略强度选项。程序不会自动更换模型或悄悄恢复思考。
+原 OpenAI Responses 配置使用框架的 `agent.reasoning_effort`，不发送火山专用 `thinking` 字段。
+不传这两个新参数时保留原有请求行为；`eval.sh` 会显式传入它们。
+
+可以离线检查最终参数，不调用模型或评测平台：
+
+```bash
+python scripts/evaluation/wetop_online.py check \
+  --thinking enabled --reasoning-effort low
+```
+
 ## 3. 向平台申请评测任务
 
 以下命令会实际创建评测任务。提交者信息请替换为自己的信息：

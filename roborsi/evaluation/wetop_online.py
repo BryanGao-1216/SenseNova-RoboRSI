@@ -165,7 +165,14 @@ class ModelProfile:
             document.get("api_key_env", "OPENAI_API_KEY"),
         )
 
-    def agent_config(self, path: Path, overrides: list[str]) -> AgentConfig:
+    def agent_config(
+        self,
+        path: Path,
+        overrides: list[str],
+        *,
+        thinking: str | None = None,
+        reasoning_effort: str | None = None,
+    ) -> AgentConfig:
         settings = [
             f"runtime.llm.{key}={json.dumps(value)}" for key, value in self.llm.items()
         ]
@@ -177,7 +184,42 @@ class ModelProfile:
         runtime = config.runtime()  # Validate before allocating a remote worker.
         if runtime.llm is None:
             raise ValueError("online WET-OP requires runtime.llm")
+        if thinking == "disabled" and _always_thinking(runtime.llm.model):
+            raise ValueError(
+                f"{runtime.llm.model} 始终开启思考，不支持关闭。"
+                "请使用 --thinking enabled --reasoning-effort low 降低思考强度；"
+                "完全关闭思考需要选择支持非思考模式的模型。"
+            )
+        if thinking is not None or reasoning_effort is not None:
+            enabled = thinking != "disabled"
+            effort = reasoning_effort or "low"
+            controls = [
+                f"agent.reasoning_effort={json.dumps(effort if enabled else 'none')}"
+            ]
+            if runtime.llm.openai_format == "chat":
+                # Ark's custom model names are not necessarily recognized by the
+                # generic SDK profile. Send explicit Ark Chat API parameters.
+                extra = dict(runtime.llm.extra_body or {})
+                if _always_thinking(runtime.llm.model):
+                    # Kimi K3.1 Pro uses reasoning_effort, not thinking.type.
+                    extra.pop("thinking", None)
+                else:
+                    extra["thinking"] = {"type": "enabled" if enabled else "disabled"}
+                if enabled:
+                    extra["reasoning_effort"] = effort
+                else:
+                    extra.pop("reasoning_effort", None)
+                controls.append(f"runtime.llm.extra_body={json.dumps(extra)}")
+            config = AgentConfig.from_file(
+                path, overrides=[*settings, *overrides, *controls]
+            )
+            config.runtime()
         return config
+
+
+def _always_thinking(model: str) -> bool:
+    """Recognize the documented Kimi K3.1 Pro aliases, including dated IDs."""
+    return bool(re.match(r"(?:kimi-)?k3[.\-]1-pro(?:$|-)", model.lower()))
 
 
 def action_schema(max_chunk_steps: int = 60) -> dict[str, Any]:
@@ -1066,6 +1108,16 @@ def main(argv: list[str] | None = None) -> int:
         "--agent-config", type=Path, default=ROOT / "configs/agents/wetop/online.yaml"
     )
     parser.add_argument("--agent-set", action="append", default=[], metavar="PATH=JSON")
+    parser.add_argument(
+        "--thinking",
+        choices=("enabled", "disabled"),
+        help="explicit thinking control; Kimi K3.1 Pro cannot disable thinking",
+    )
+    parser.add_argument(
+        "--reasoning-effort",
+        choices=("low", "medium", "high", "xhigh", "max"),
+        help="thinking effort (default low with --thinking enabled; ignored if disabled)",
+    )
     parser.add_argument("--endpoint", default=os.environ.get("EBENCH_ONLINE_ENDPOINT"))
     parser.add_argument("--run-id", default=os.environ.get("EBENCH_TASK_ID"))
     parser.add_argument("--token-env", default="EBENCH_SUBMIT_TOKEN")
@@ -1092,7 +1144,12 @@ def main(argv: list[str] | None = None) -> int:
             timing.measure("configuration", announce=True) if timing else nullcontext()
         ):
             profile = ModelProfile.load(args.model_config)
-            config = profile.agent_config(args.agent_config, args.agent_set)
+            config = profile.agent_config(
+                args.agent_config,
+                args.agent_set,
+                thinking=args.thinking,
+                reasoning_effort=args.reasoning_effort,
+            )
             action_schema(args.max_chunk_steps)
             if not re.fullmatch(r"[A-Za-z_]\w*", args.token_env):
                 raise ValueError("token-env must name an environment variable")
@@ -1112,12 +1169,28 @@ def main(argv: list[str] | None = None) -> int:
                         "platform_token_present": bool(os.environ.get(args.token_env)),
                         "client_version": sdk_version,
                         "expected_client_revision": CLIENT_REVISION,
+                        "thinking_request": args.thinking,
+                        "reasoning_effort_request": args.reasoning_effort,
                     },
                     ensure_ascii=False,
                     indent=2,
                 )
             )
             return 0
+        llm = config.runtime().llm
+        mode = (
+            "始终开启（模型不支持关闭）"
+            if _always_thinking(llm.model)
+            else (args.thinking or "未显式指定")
+        )
+        effort = (llm.extra_body or {}).get("reasoning_effort") or (
+            args.reasoning_effort if args.thinking != "disabled" else "不适用"
+        )
+        print(
+            f"[模型设置] {llm.model} | 思考={mode} | "
+            f"请求思考强度={effort or '未指定（服务端默认）'}",
+            flush=True,
+        )
         if not args.endpoint or not args.run_id:
             raise ValueError(
                 "set --endpoint and --run-id from gmp online submit (or EBENCH_ONLINE_ENDPOINT/EBENCH_TASK_ID)"
@@ -1180,6 +1253,8 @@ def main(argv: list[str] | None = None) -> int:
             ).hexdigest(),
             "max_chunk_steps": args.max_chunk_steps,
             "max_decisions": args.max_decisions,
+            "thinking_request": args.thinking,
+            "reasoning_effort_request": args.reasoning_effort,
         }
         result = run_online(
             client,

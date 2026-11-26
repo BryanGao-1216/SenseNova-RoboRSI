@@ -26,6 +26,23 @@ The extra pins the official SDK to commit
 `fbfcd776639db82be3becdc6e39b5401f994da5c`. The offline check validates config and
 reports credential presence; it does not allocate a worker or query a model.
 `ARK_MODEL_NAME` and `ARK_BASE_URL` override the existing model profile defaults.
+
+`eval.sh` exposes `THINKING='enabled'` and `REASONING_EFFORT='low'`, passed as
+`--thinking` and `--reasoning-effort`. Kimi K3.1 Pro always reasons and cannot
+disable thinking, per the [Ark documentation](https://docs.volcengine.com/docs/ark/deep-thinking?lang=zh).
+Its effort is explicitly sent as `reasoning_effort` in the Chat request body;
+no `thinking` field is sent for this model. `low` reduces effort while keeping
+reasoning enabled; it does not guarantee a particular latency or success rate.
+Attempting `--thinking disabled` with this model fails before loading the client
+or allocating a worker. The old framework setting `reasoning_effort: none` did
+not guarantee that this model stopped reasoning.
+
+For Ark Chat models that support disabling thinking, `--thinking disabled` sends
+`thinking.type=disabled` and ignores the effort option. OpenAI Responses uses the
+framework's reasoning setting without Ark-specific body fields. Omitting the new
+flags preserves prior request behavior; the shell script explicitly supplies
+them. Startup output and `run.json` record the selected controls. An offline
+check is available with `wetop_online.py check --thinking enabled --reasoning-effort low`.
 Use the same interpreter for installation and evaluation, especially when a
 Conda base environment is also active. The extra restricts PyTurboJPEG to 1.x
 for Ubuntu 20.04's native libjpeg-turbo 2.x; PyTurboJPEG 2.x requires native 3.0+.
